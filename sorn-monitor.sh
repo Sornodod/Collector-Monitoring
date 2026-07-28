@@ -582,18 +582,49 @@ show_logs() {
 send_logs_to_telegram() {
     print_info "Отправка логов в Telegram..."
     
-    local logs=$(sudo journalctl -u $SERVICE_NAME -n 20 --no-pager)
-    local message="#SornMonitor_Логи 📋\n\n\`\`\`\n$logs\n\`\`\`"
+    # Проверяем что Telegram настроен
+    if [ -z "$TELEGRAM_TOKEN" ] || [ "$CHAT_ID" = "0" ]; then
+        print_error "Telegram не настроен! Сначала настрой бота."
+        return 1
+    fi
     
-    if [ -n "$TELEGRAM_TOKEN" ] && [ "$CHAT_ID" != "0" ]; then
-        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=${message}" \
-            -d "parse_mode=MarkdownV2" > /dev/null
+    # Получаем логи
+    local logs=$(sudo journalctl -u $SERVICE_NAME -n 30 --no-pager 2>/dev/null)
+    if [ -z "$logs" ]; then
+        print_error "Нет логов для отправки!"
+        return 1
+    fi
+    
+    # Отправляем как обычный текст (без форматирования)
+    local hostname=$(hostname)
+    local message="📋 Логи SornMonitor ($hostname):%0A%0A"
+    
+    # Добавляем логи с заменой перевода строк
+    local encoded_logs=$(echo "$logs" | sed 's/$/%0A/g' | tr -d '\n')
+    local full_message="${message}${encoded_logs}"
+    
+    # Обрезаем если слишком длинное (Telegram лимит 4096 символов)
+    if [ ${#full_message} -gt 4000 ]; then
+        print_warning "Логи слишком длинные, отправляем последние 15 строк..."
+        local short_logs=$(echo "$logs" | tail -15)
+        local encoded_short=$(echo "$short_logs" | sed 's/$/%0A/g' | tr -d '\n')
+        full_message="📋 Логи SornMonitor ($hostname) (последние 15 строк):%0A%0A${encoded_short}"
+    fi
+    
+    print_info "Отправка в Telegram..."
+    
+    local response=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+        -d "chat_id=${CHAT_ID}" \
+        -d "text=${full_message}")
+    
+    if echo "$response" | grep -q '"ok":true'; then
         print_success "Логи отправлены в Telegram"
     else
-        print_error "Telegram не настроен"
+        local error_msg=$(echo "$response" | jq -r '.description // "Неизвестная ошибка"' 2>/dev/null)
+        print_error "Ошибка отправки: $error_msg"
     fi
+    
+    read -p "Нажмите Enter для продолжения"
 }
 
 # ============================================================
@@ -619,15 +650,52 @@ setup_auth_logging() {
 }
 
 # ============================================================
-# 15. Настройка ротации логов
+# 15. Настройка ротации логов (ИСПРАВЛЕНО)
 # ============================================================
 
 setup_log_rotation() {
+    clear
+    print_header
+    echo ""
     print_info "Настройка ротации логов..."
+    echo ""
     
     LOGROTATE_CONF="/etc/logrotate.d/sornmonitor"
     
+    # Проверяем, есть ли уже конфиг
+    if [ -f "$LOGROTATE_CONF" ]; then
+        echo -e "${YELLOW}⚠️  Конфиг ротации уже существует:${NC}"
+        echo ""
+        cat "$LOGROTATE_CONF"
+        echo ""
+        read -p "Перезаписать конфиг? (y/n): " overwrite
+        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
+            print_info "Отмена"
+            read -p "Нажмите Enter для продолжения"
+            return
+        fi
+        echo ""
+    fi
+    
+    # Показываем что будем делать
+    echo -e "${YELLOW}📝 Будет создан конфиг для ротации логов:${NC}"
+    echo "  - Ротация: ежедневно"
+    echo "  - Хранение: 7 дней"
+    echo "  - Сжатие: включено"
+    echo "  - Файлы: все *.log в $(pwd)"
+    echo ""
+    read -p "Продолжить? (y/n): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        print_info "Отмена"
+        read -p "Нажмите Enter для продолжения"
+        return
+    fi
+    
+    # Создаем конфиг
     sudo bash -c "cat > $LOGROTATE_CONF << EOF
+# Конфиг ротации логов SornMonitor
+# Создан: $(date)
+
 $COLLECTOR_DIR/*.log {
     daily
     rotate 7
@@ -642,6 +710,7 @@ $COLLECTOR_DIR/*.log {
     endscript
 }
 
+# Ротация системных логов
 /var/log/journal/* {
     daily
     rotate 30
@@ -658,11 +727,29 @@ $COLLECTOR_DIR/*.log {
 EOF"
     
     if [ $? -eq 0 ]; then
-        print_success "Ротация логов настроена (конфиг: $LOGROTATE_CONF)"
+        print_success "Ротация логов настроена!"
+        echo ""
+        echo -e "${GREEN}✅ Конфиг создан: $LOGROTATE_CONF${NC}"
+        echo ""
+        echo -e "${YELLOW}📋 Содержимое конфига:${NC}"
+        echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
+        cat "$LOGROTATE_CONF"
+        echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
+        echo ""
         print_info "Логи будут ротироваться ежедневно, храниться 7 дней"
+        echo ""
+        echo -e "${YELLOW}🧪 Проверка ротации:${NC}"
+        echo "  sudo logrotate -vf $LOGROTATE_CONF"
+        echo ""
+        echo -e "${YELLOW}📊 Статус ротации:${NC}"
+        echo "  sudo cat /var/lib/logrotate/status | grep sornmonitor"
     else
-        print_error "Не удалось настроить ротацию логов"
+        print_error "Не удалось создать конфиг ротации!"
+        echo "Возможно, нужны права root или нет директории /etc/logrotate.d/"
     fi
+    
+    echo ""
+    read -p "Нажмите Enter для продолжения"
 }
 
 # ============================================================
@@ -693,7 +780,7 @@ check_port() {
 }
 
 # ============================================================
-# 17. Статус системы
+# 17. Показать статус системы
 # ============================================================
 
 show_status() {
