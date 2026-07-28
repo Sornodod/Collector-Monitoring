@@ -35,6 +35,9 @@ if os.path.exists(CONFIG_FILE):
     BROADCAST_MODE = config.get('broadcast_mode', False)
     ADMIN_LOGIN = config.get('admin_login', 'admin')
     ADMIN_PASSWORD = config.get('admin_password', 'admin123')
+    WEB_ENABLED = config.get('web_enabled', True)  # ← НОВОЕ!
+    WEB_HOST = config.get('web_host', '0.0.0.0')
+    WEB_PORT = config.get('web_port', 5000)
     ALLOWED_IPS = config.get('allowed_ips', ['127.0.0.1'])
 else:
     print("❌ Конфиг не найден!")
@@ -62,6 +65,20 @@ USERS = {ADMIN_LOGIN: ADMIN_PASSWORD}
 EVENTS_FILE = 'events.json'
 ALLOWED_IPS_FILE = 'allowed_ips.json'
 
+# Загружаем белый список из файла если есть
+def load_allowed_ips():
+    if os.path.exists(ALLOWED_IPS_FILE):
+        try:
+            with open(ALLOWED_IPS_FILE, 'r') as f:
+                ips = json.load(f)
+                if isinstance(ips, list) and ips:
+                    return ips
+        except:
+            pass
+    return ALLOWED_IPS
+
+ALLOWED_IPS = load_allowed_ips()
+
 def load_events():
     if os.path.exists(EVENTS_FILE):
         with open(EVENTS_FILE, 'r') as f:
@@ -78,6 +95,33 @@ if len(events) > 1000:
     save_events(events)
 
 queue = []
+
+# Логирование попыток авторизации
+AUTH_LOG = 'auth_attempts.log'
+
+def log_auth_attempt(ip, username, success=False, message=""):
+    """Логирует попытку авторизации"""
+    try:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        status = "✅ УСПЕШНО" if success else "❌ НЕУДАЧНО"
+        log_entry = f"[{timestamp}] {status} | IP: {ip} | Пользователь: {username} | {message}\n"
+        with open(AUTH_LOG, 'a') as f:
+            f.write(log_entry)
+    except Exception as e:
+        print(f"Ошибка логирования: {e}")
+
+# Логирование отправки событий
+WEBHOOK_LOG = 'webhook_requests.log'
+
+def log_webhook_request(ip, data, status=200):
+    """Логирует запрос к webhook"""
+    try:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f"[{timestamp}] IP: {ip} | Статус: {status} | Данные: {json.dumps(data)}\n"
+        with open(WEBHOOK_LOG, 'a') as f:
+            f.write(log_entry)
+    except Exception as e:
+        print(f"Ошибка логирования: {e}")
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -255,24 +299,37 @@ document.addEventListener('DOMContentLoaded',function(){applyFilters();startAuto
 </body></html>
 '''
 
+# Маршруты
 @app.route('/', methods=['GET', 'POST'])
 def login():
     if session.get('authenticated'):
-        return render_template_string(MAIN_HTML, events=events, queue_size=len(queue), session=session, totp_enabled=TOTP_SECRET is not None)
+        return render_template_string(MAIN_HTML, 
+                                    events=events, 
+                                    queue_size=len(queue), 
+                                    session=session,
+                                    totp_enabled=TOTP_SECRET is not None)
+    
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
         totp_code = request.form.get('totp', '')
+        client_ip = request.remote_addr
+        
         if username in USERS and USERS[username] == password:
             if TOTP_SECRET:
                 totp = pyotp.TOTP(TOTP_SECRET)
                 if not totp.verify(totp_code):
+                    log_auth_attempt(client_ip, username, False, "Неверный 2FA код")
                     return render_template_string(LOGIN_HTML, error="❌ Неверный 2FA код", totp_enabled=True)
+            
             session['authenticated'] = True
             session['username'] = username
+            log_auth_attempt(client_ip, username, True, "Успешный вход")
             return redirect(url_for('login'))
         else:
+            log_auth_attempt(client_ip, username, False, "Неверный логин или пароль")
             return render_template_string(LOGIN_HTML, error="❌ Неверный логин или пароль", totp_enabled=TOTP_SECRET is not None)
+    
     return render_template_string(LOGIN_HTML, error=None, totp_enabled=TOTP_SECRET is not None)
 
 @app.route('/logout', methods=['POST'])
@@ -330,22 +387,29 @@ def remove_ip():
 def webhook():
     global events, queue
     client_ip = request.remote_addr
+    data = request.json
+    
+    # Проверка IP
     if client_ip != '127.0.0.1' and client_ip not in ALLOWED_IPS:
         print(f"🔴 БЛОКИРОВКА: {client_ip}")
+        log_webhook_request(client_ip, data, 403)
         return 'Forbidden', 403
-    data = request.json
+    
     event = {
         'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'server': data.get('server', 'unknown'),
         'message': data.get('message', ''),
         'error': data.get('error', '')
     }
+    
     queue.append(event)
     events.append(event)
     if len(events) > 1000:
         events = events[-1000:]
     save_events(events)
+    
     print(f"[{event['time']}] {event['server']}: {event['message']}")
+    log_webhook_request(client_ip, data, 200)
     return 'OK', 200
 
 @app.route('/clear', methods=['POST'])
@@ -394,14 +458,34 @@ def get_stats():
     return jsonify(stats)
 
 if __name__ == '__main__':
-    print(f"🚀 Загружено {len(events)} событий")
-    print(f"📨 Очередь: {len(queue)}")
-    print(f"🤖 Telegram бот: {'✅' if TOKEN else '❌'}")
-    print(f"👤 Логин: {ADMIN_LOGIN}")
-    if TOTP_SECRET:
-        print(f"🔐 2FA секрет: {TOTP_SECRET}")
+    # Проверяем, включена ли веб-морда
+    if not WEB_ENABLED:
+        print("🌐 Веб-морда ОТКЛЮЧЕНА (работает только телеграм)")
+        print(f"🚀 Загружено {len(events)} событий")
+        print(f"📨 Очередь: {len(queue)}")
+        print(f"🤖 Telegram бот: {'✅' if TOKEN else '❌'}")
+        print(f"👤 Логин: {ADMIN_LOGIN}")
+        if TOTP_SECRET:
+            print(f"🔐 2FA секрет: {TOTP_SECRET}")
+        else:
+            print("⚠️  2FA отключена")
+        print(f"🌐 Белый список: {', '.join(ALLOWED_IPS)}")
+        
+        # Бесконечный цикл для поддержки телеграм-обработчика
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n⏹️ Остановка коллектора...")
     else:
-        print("⚠️  2FA отключена")
-    print(f"🌐 Белый список: {', '.join(ALLOWED_IPS)}")
-    print(f"🌐 Сервер: http://{args.host}:{args.port}")
-    app.run(host=args.host, port=args.port, debug=False)
+        print(f"🚀 Загружено {len(events)} событий")
+        print(f"📨 Очередь: {len(queue)}")
+        print(f"🤖 Telegram бот: {'✅' if TOKEN else '❌'}")
+        print(f"👤 Логин: {ADMIN_LOGIN}")
+        if TOTP_SECRET:
+            print(f"🔐 2FA секрет: {TOTP_SECRET}")
+        else:
+            print("⚠️  2FA отключена")
+        print(f"🌐 Белый список: {', '.join(ALLOWED_IPS)}")
+        print(f"🌐 Сервер: http://{args.host}:{args.port}")
+        app.run(host=args.host, port=args.port, debug=False)
