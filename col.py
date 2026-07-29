@@ -418,35 +418,14 @@ document.addEventListener('DOMContentLoaded',function(){applyFilters();startAuto
 '''
 
 # ============================================================
-# Веб-морда отключена — заглушка
-# ============================================================
-
-WEB_DISABLED_HTML = '''
-<!DOCTYPE html>
-<html>
-<head><title>Web UI Disabled</title></head>
-<body style="background:#1e1e1e;color:#d4d4d4;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
-    <div style="text-align:center;max-width:600px;padding:40px;background:#252526;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);">
-        <h1 style="color:#f44747;">🌐 Веб-морда отключена</h1>
-        <p style="color:#888;">Веб-интерфейс отключен в настройках.</p>
-        <p style="color:#888;">Webhook доступен по адресу: <code style="background:#1e1e1e;padding:2px 8px;border-radius:4px;color:#4ec9b0;">/webhook</code></p>
-        <p style="color:#888;">Статус: <span style="color:#4ec9b0;">✅ Коллектор работает</span></p>
-        <hr style="border-color:#333;">
-        <p style="color:#555;font-size:12px;">SornMonitor Collector v2.0</p>
-    </div>
-</body>
-</html>
-'''
-
-# ============================================================
 # Маршруты Flask
 # ============================================================
 
 @app.route('/', methods=['GET', 'POST'])
 def login():
-    # Если веб-морда отключена — показываем заглушку
+    # Если веб-морда отключена — возвращаем 404
     if not WEB_ENABLED:
-        return WEB_DISABLED_HTML, 200
+        return 'Web UI disabled', 404
     
     if session.get('authenticated'):
         return render_template_string(MAIN_HTML, 
