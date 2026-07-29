@@ -12,7 +12,40 @@ import sys
 import argparse
 import traceback
 
+# ============================================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ
+# ============================================================
+
+# Создаем директорию для логов если нет
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # В stdout (journalctl)
+        logging.FileHandler(os.path.join(LOG_DIR, 'collector.log')),  # В файл
+        logging.FileHandler(os.path.join(LOG_DIR, 'errors.log'))  # Отдельно ошибки
+    ]
+)
+
+# Отдельный логгер для ошибок
+error_logger = logging.getLogger('errors')
+error_logger.setLevel(logging.ERROR)
+error_handler = logging.FileHandler(os.path.join(LOG_DIR, 'errors.log'))
+error_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+error_logger.addHandler(error_handler)
+
+# Основной логгер
+logger = logging.getLogger(__name__)
+
+# ============================================================
 # Парсинг аргументов
+# ============================================================
+
 parser = argparse.ArgumentParser(description='SornMonitor Collector')
 parser.add_argument('--no2fa', action='store_true', help='Отключить 2FA')
 parser.add_argument('--port', type=int, default=5000, help='Порт')
@@ -22,11 +55,14 @@ args = parser.parse_args()
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
-# Отключаем логи GET
+# Отключаем логи GET от Flask
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
+# ============================================================
 # Загрузка конфига
+# ============================================================
+
 CONFIG_FILE = os.path.expanduser('~/.config/sornmonitor/config.json')
 if os.path.exists(CONFIG_FILE):
     with open(CONFIG_FILE, 'r') as f:
@@ -41,10 +77,13 @@ if os.path.exists(CONFIG_FILE):
     WEB_PORT = config.get('web_port', 5000)
     ALLOWED_IPS = config.get('allowed_ips', ['127.0.0.1'])
 else:
-    print("❌ Конфиг не найден!")
+    logger.error("❌ Конфиг не найден!")
     sys.exit(1)
 
+# ============================================================
 # 2FA
+# ============================================================
+
 TOTP_SECRET = None
 if not args.no2fa and config.get('enable_2fa', True):
     SECRET_FILE = '2fa_secret.json'
@@ -52,21 +91,25 @@ if not args.no2fa and config.get('enable_2fa', True):
         with open(SECRET_FILE, 'r') as f:
             secret_data = json.load(f)
             TOTP_SECRET = secret_data.get('secret')
+        logger.info("🔐 2FA секрет загружен из файла")
     else:
         TOTP_SECRET = pyotp.random_base32()
         with open(SECRET_FILE, 'w') as f:
             json.dump({'secret': TOTP_SECRET}, f)
-    print("🔐 2FA включена")
+        logger.info("🔐 2FA секрет сгенерирован и сохранен")
+    logger.info("🔐 2FA включена")
 else:
-    print("⚠️  2FA отключена")
+    logger.warning("⚠️  2FA отключена")
 
 USERS = {ADMIN_LOGIN: ADMIN_PASSWORD}
 
+# ============================================================
 # Файлы данных
+# ============================================================
+
 EVENTS_FILE = 'events.json'
 ALLOWED_IPS_FILE = 'allowed_ips.json'
 
-# Загружаем белый список из файла если есть
 def load_allowed_ips():
     if os.path.exists(ALLOWED_IPS_FILE):
         try:
@@ -74,21 +117,27 @@ def load_allowed_ips():
                 ips = json.load(f)
                 if isinstance(ips, list) and ips:
                     return ips
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка загрузки белого списка: {e}")
     return ALLOWED_IPS
 
 ALLOWED_IPS = load_allowed_ips()
 
 def load_events():
     if os.path.exists(EVENTS_FILE):
-        with open(EVENTS_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(EVENTS_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Ошибка загрузки событий: {e}")
     return []
 
 def save_events(events):
-    with open(EVENTS_FILE, 'w') as f:
-        json.dump(events, f, indent=2)
+    try:
+        with open(EVENTS_FILE, 'w') as f:
+            json.dump(events, f, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения событий: {e}")
 
 events = load_events()
 if len(events) > 1000:
@@ -97,8 +146,11 @@ if len(events) > 1000:
 
 queue = []
 
+# ============================================================
 # Логирование попыток авторизации
-AUTH_LOG = 'auth_attempts.log'
+# ============================================================
+
+AUTH_LOG = os.path.join(LOG_DIR, 'auth_attempts.log')
 
 def log_auth_attempt(ip, username, success=False, message=""):
     """Логирует попытку авторизации"""
@@ -108,12 +160,15 @@ def log_auth_attempt(ip, username, success=False, message=""):
         log_entry = f"[{timestamp}] {status} | IP: {ip} | Пользователь: {username} | {message}\n"
         with open(AUTH_LOG, 'a') as f:
             f.write(log_entry)
-        print(f"🔐 [АВТОРИЗАЦИЯ] {status} | {username} | {ip} | {message}")
+        logger.info(f"🔐 [AUTH] {status} | {username} | {ip} | {message}")
     except Exception as e:
-        print(f"Ошибка логирования: {e}")
+        logger.error(f"Ошибка логирования авторизации: {e}")
 
-# Логирование отправки событий
-WEBHOOK_LOG = 'webhook_requests.log'
+# ============================================================
+# Логирование webhook запросов
+# ============================================================
+
+WEBHOOK_LOG = os.path.join(LOG_DIR, 'webhook_requests.log')
 
 def log_webhook_request(ip, data, status=200):
     """Логирует запрос к webhook"""
@@ -123,7 +178,11 @@ def log_webhook_request(ip, data, status=200):
         with open(WEBHOOK_LOG, 'a') as f:
             f.write(log_entry)
     except Exception as e:
-        print(f"Ошибка логирования: {e}")
+        logger.error(f"Ошибка логирования webhook: {e}")
+
+# ============================================================
+# Отправка в Telegram
+# ============================================================
 
 def send_telegram(text):
     """Отправляет сообщение в Telegram с логированием"""
@@ -131,17 +190,17 @@ def send_telegram(text):
     
     if BROADCAST_MODE:
         try:
-            print("📡 [BROADCAST] Получение списка подписчиков...")
+            logger.info("📡 [BROADCAST] Получение списка подписчиков...")
             updates = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates", timeout=10).json()
             chat_ids = set()
             for update in updates.get('result', []):
                 if 'message' in update:
                     chat_ids.add(update['message']['chat']['id'])
             
-            print(f"👥 [BROADCAST] Найдено подписчиков: {len(chat_ids)}")
+            logger.info(f"👥 [BROADCAST] Найдено подписчиков: {len(chat_ids)}")
             
             if not chat_ids:
-                print("⚠️ [BROADCAST] Нет подписчиков! Напишите /start боту")
+                logger.warning("⚠️ [BROADCAST] Нет подписчиков! Напишите /start боту")
                 return False
             
             success_count = 0
@@ -150,64 +209,68 @@ def send_telegram(text):
                     response = requests.post(url, json={'chat_id': chat_id, 'text': text}, timeout=10)
                     if response.status_code == 200:
                         success_count += 1
-                        print(f"📨 [BROADCAST] Отправлено в чат {chat_id}: OK")
+                        logger.info(f"📨 [BROADCAST] Отправлено в чат {chat_id}: OK")
                     else:
-                        print(f"❌ [BROADCAST] Ошибка в чат {chat_id}: {response.status_code}")
+                        logger.error(f"❌ [BROADCAST] Ошибка в чат {chat_id}: {response.status_code}")
                 except Exception as e:
-                    print(f"❌ [BROADCAST] Ошибка в чат {chat_id}: {e}")
+                    logger.error(f"❌ [BROADCAST] Ошибка в чат {chat_id}: {e}")
             
-            print(f"📊 [BROADCAST] Успешно отправлено: {success_count}/{len(chat_ids)}")
+            logger.info(f"📊 [BROADCAST] Успешно отправлено: {success_count}/{len(chat_ids)}")
             return success_count > 0
             
         except Exception as e:
-            print(f"❌ [BROADCAST] Критическая ошибка: {e}")
-            traceback.print_exc()
+            logger.error(f"❌ [BROADCAST] Критическая ошибка: {e}")
+            error_logger.error(traceback.format_exc())
             return False
     else:
         try:
-            print(f"📡 [PRIVATE] Отправка в чат {CHAT_ID}...")
+            logger.info(f"📡 [PRIVATE] Отправка в чат {CHAT_ID}...")
             response = requests.post(url, json={'chat_id': CHAT_ID, 'text': text}, timeout=10)
-            print(f"📨 [PRIVATE] Статус ответа: {response.status_code}")
+            logger.info(f"📨 [PRIVATE] Статус ответа: {response.status_code}")
             
             if response.status_code == 200:
-                print(f"✅ [PRIVATE] Успешно отправлено в чат {CHAT_ID}")
+                logger.info(f"✅ [PRIVATE] Успешно отправлено в чат {CHAT_ID}")
                 return True
             else:
-                print(f"❌ [PRIVATE] Ошибка: {response.text}")
+                logger.error(f"❌ [PRIVATE] Ошибка: {response.text}")
                 return False
                 
         except requests.exceptions.Timeout:
-            print("❌ [PRIVATE] Таймаут при отправке в Telegram")
+            logger.error("❌ [PRIVATE] Таймаут при отправке в Telegram")
             return False
         except Exception as e:
-            print(f"❌ [PRIVATE] Ошибка Telegram: {e}")
-            traceback.print_exc()
+            logger.error(f"❌ [PRIVATE] Ошибка Telegram: {e}")
+            error_logger.error(traceback.format_exc())
             return False
+
+# ============================================================
+# Фоновый поток отправки
+# ============================================================
 
 def telegram_sender():
     """Фоновый поток для отправки сообщений в Telegram"""
     global queue
-    print("🔄 [THREAD] Поток telegram_sender запущен")
+    logger.info("🔄 [THREAD] Поток telegram_sender запущен")
     
     while True:
         try:
             if queue:
                 queue_size = len(queue)
-                print(f"📨 [THREAD] Обработка очереди: {queue_size} событий")
+                logger.info(f"📨 [THREAD] Обработка очереди: {queue_size} событий")
                 
                 event = queue.pop(0)
-                print(f"📤 [THREAD] Отправка: {event['server']} | {event['message']}")
+                logger.info(f"📤 [THREAD] Отправка: {event['server']} | {event['message']}")
                 
                 text = f"📊 {event['server']}\n📝 {event['message']}"
                 if event.get('error'):
                     text = f"⚠️ {text}"
                 
                 if send_telegram(text):
-                    print(f"✅ [THREAD] Успешно отправлено: {event['server']}")
+                    logger.info(f"✅ [THREAD] Успешно отправлено: {event['server']}")
                 else:
-                    print(f"❌ [THREAD] Ошибка отправки, возвращаем в очередь: {event['server']}")
+                    logger.warning(f"❌ [THREAD] Ошибка отправки, возвращаем в очередь: {event['server']}")
                     queue.insert(0, event)
-                    print(f"⏳ [THREAD] Пауза 5 секунд перед повторной попыткой...")
+                    logger.info(f"⏳ [THREAD] Пауза 5 секунд перед повторной попыткой...")
                     time.sleep(5)
             else:
                 # Очередь пуста, просто ждем
@@ -216,16 +279,20 @@ def telegram_sender():
             time.sleep(0.5)
             
         except Exception as e:
-            print(f"🔥 [THREAD] КРИТИЧЕСКАЯ ОШИБКА в telegram_sender: {e}")
-            traceback.print_exc()
-            print(f"⏳ [THREAD] Пауза 10 секунд после критической ошибки...")
+            logger.error(f"🔥 [THREAD] КРИТИЧЕСКАЯ ОШИБКА в telegram_sender: {e}")
+            error_logger.error(traceback.format_exc())
+            logger.info(f"⏳ [THREAD] Пауза 10 секунд после критической ошибки...")
             time.sleep(10)
 
 # Запускаем поток отправки
-print("🔄 Запуск фонового потока telegram_sender...")
+logger.info("🔄 Запуск фонового потока telegram_sender...")
 thread = threading.Thread(target=telegram_sender, daemon=True)
 thread.start()
-print("✅ Фоновый поток запущен")
+logger.info("✅ Фоновый поток запущен")
+
+# ============================================================
+# HTML страницы
+# ============================================================
 
 LOGIN_HTML = '''
 <!DOCTYPE html>
@@ -358,7 +425,10 @@ document.addEventListener('DOMContentLoaded',function(){applyFilters();startAuto
 </body></html>
 '''
 
-# Маршруты
+# ============================================================
+# Маршруты Flask
+# ============================================================
+
 @app.route('/', methods=['GET', 'POST'])
 def login():
     if session.get('authenticated'):
@@ -374,23 +444,23 @@ def login():
         totp_code = request.form.get('totp', '')
         client_ip = request.remote_addr
         
-        print(f"🔐 [AUTH] Попытка входа: {username} | IP: {client_ip}")
+        logger.info(f"🔐 [AUTH] Попытка входа: {username} | IP: {client_ip}")
         
         if username in USERS and USERS[username] == password:
             if TOTP_SECRET:
                 totp = pyotp.TOTP(TOTP_SECRET)
                 if not totp.verify(totp_code):
-                    print(f"❌ [AUTH] Неверный 2FA код: {username} | IP: {client_ip}")
+                    logger.warning(f"❌ [AUTH] Неверный 2FA код: {username} | IP: {client_ip}")
                     log_auth_attempt(client_ip, username, False, "Неверный 2FA код")
                     return render_template_string(LOGIN_HTML, error="❌ Неверный 2FA код", totp_enabled=True)
             
             session['authenticated'] = True
             session['username'] = username
-            print(f"✅ [AUTH] Успешный вход: {username} | IP: {client_ip}")
+            logger.info(f"✅ [AUTH] Успешный вход: {username} | IP: {client_ip}")
             log_auth_attempt(client_ip, username, True, "Успешный вход")
             return redirect(url_for('login'))
         else:
-            print(f"❌ [AUTH] Неверные логин/пароль: {username} | IP: {client_ip}")
+            logger.warning(f"❌ [AUTH] Неверные логин/пароль: {username} | IP: {client_ip}")
             log_auth_attempt(client_ip, username, False, "Неверный логин или пароль")
             return render_template_string(LOGIN_HTML, error="❌ Неверный логин или пароль", totp_enabled=TOTP_SECRET is not None)
     
@@ -399,7 +469,7 @@ def login():
 @app.route('/logout', methods=['POST'])
 def logout():
     session.clear()
-    print("🚪 [AUTH] Выход из системы")
+    logger.info("🚪 [AUTH] Выход из системы")
     return 'OK', 200
 
 @app.route('/api/ips', methods=['GET'])
@@ -431,7 +501,7 @@ def add_ip():
     ALLOWED_IPS.append(ip)
     with open(ALLOWED_IPS_FILE, 'w') as f:
         json.dump(ALLOWED_IPS, f, indent=2)
-    print(f"✅ [IP] Добавлен IP: {ip}")
+    logger.info(f"✅ [IP] Добавлен IP: {ip}")
     return jsonify({'status': 'ok', 'message': f'IP {ip} добавлен'})
 
 @app.route('/api/ips', methods=['DELETE'])
@@ -447,7 +517,7 @@ def remove_ip():
     ALLOWED_IPS.remove(ip)
     with open(ALLOWED_IPS_FILE, 'w') as f:
         json.dump(ALLOWED_IPS, f, indent=2)
-    print(f"🗑️ [IP] Удален IP: {ip}")
+    logger.info(f"🗑️ [IP] Удален IP: {ip}")
     return jsonify({'status': 'ok', 'message': f'IP {ip} удален'})
 
 @app.route('/webhook', methods=['POST'])
@@ -456,11 +526,11 @@ def webhook():
     client_ip = request.remote_addr
     data = request.json
     
-    print(f"📥 [WEBHOOK] Получен запрос от {client_ip}")
+    logger.info(f"📥 [WEBHOOK] Получен запрос от {client_ip}")
     
     # Проверка IP
     if client_ip != '127.0.0.1' and client_ip not in ALLOWED_IPS:
-        print(f"🔴 [WEBHOOK] БЛОКИРОВКА: {client_ip} не в белом списке")
+        logger.warning(f"🔴 [WEBHOOK] БЛОКИРОВКА: {client_ip} не в белом списке")
         log_webhook_request(client_ip, data, 403)
         return 'Forbidden', 403
     
@@ -471,7 +541,7 @@ def webhook():
         'error': data.get('error', '')
     }
     
-    print(f"📥 [WEBHOOK] Событие: {event['server']} | {event['message']} | Ошибка: {event['error']}")
+    logger.info(f"📥 [WEBHOOK] Событие: {event['server']} | {event['message']} | Ошибка: {event['error']}")
     
     queue.append(event)
     events.append(event)
@@ -480,7 +550,7 @@ def webhook():
     save_events(events)
     
     queue_size = len(queue)
-    print(f"📊 [WEBHOOK] Очередь: {queue_size} событий")
+    logger.info(f"📊 [WEBHOOK] Очередь: {queue_size} событий")
     log_webhook_request(client_ip, data, 200)
     
     return 'OK', 200
@@ -492,7 +562,7 @@ def clear():
     global events
     events = []
     save_events(events)
-    print("🗑️ [CLEAR] Все события очищены")
+    logger.info("🗑️ [CLEAR] Все события очищены")
     return 'OK', 200
 
 @app.route('/events', methods=['GET'])
@@ -531,6 +601,10 @@ def get_stats():
             stats[server]['errors'] += 1
     return jsonify(stats)
 
+# ============================================================
+# Запуск
+# ============================================================
+
 if __name__ == '__main__':
     print("=" * 60)
     print("🚀 SornMonitor Collector v2.0")
@@ -556,15 +630,25 @@ if __name__ == '__main__':
     print("📡 Ожидание событий...")
     print("")
     
+    # Создаем симлинк для логов в корень
+    log_symlink = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'collector.log')
+    if not os.path.exists(log_symlink):
+        try:
+            os.symlink(os.path.join(LOG_DIR, 'collector.log'), log_symlink)
+        except:
+            pass
+    
     if not WEB_ENABLED:
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
+            logger.info("⏹️ Остановка коллектора...")
             print("\n⏹️ Остановка коллектора...")
     else:
         try:
             app.run(host=args.host, port=args.port, debug=False)
         except Exception as e:
-            print(f"🔥 Критическая ошибка Flask: {e}")
-            traceback.print_exc()
+            logger.error(f"🔥 Критическая ошибка Flask: {e}")
+            error_logger.error(traceback.format_exc())
+            print(f"🔥 Критическая ошибка: {e}")
