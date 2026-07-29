@@ -26,7 +26,7 @@ fi
 # Функции для вывода
 print_header() {
     echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║         📊 SornMonitor Collector Manager            ║${NC}"
+    echo -e "${BLUE}║         📊 SornMonitor Collector Manager               ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════╝${NC}"
 }
 
