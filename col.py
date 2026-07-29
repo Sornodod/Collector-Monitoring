@@ -26,20 +26,18 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
-        logging.StreamHandler(sys.stdout),  # В stdout (journalctl)
-        logging.FileHandler(os.path.join(LOG_DIR, 'collector.log')),  # В файл
-        logging.FileHandler(os.path.join(LOG_DIR, 'errors.log'))  # Отдельно ошибки
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(os.path.join(LOG_DIR, 'collector.log')),
+        logging.FileHandler(os.path.join(LOG_DIR, 'errors.log'))
     ]
 )
 
-# Отдельный логгер для ошибок
 error_logger = logging.getLogger('errors')
 error_logger.setLevel(logging.ERROR)
 error_handler = logging.FileHandler(os.path.join(LOG_DIR, 'errors.log'))
 error_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 error_logger.addHandler(error_handler)
 
-# Основной логгер
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -153,7 +151,6 @@ queue = []
 AUTH_LOG = os.path.join(LOG_DIR, 'auth_attempts.log')
 
 def log_auth_attempt(ip, username, success=False, message=""):
-    """Логирует попытку авторизации"""
     try:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         status = "✅ УСПЕШНО" if success else "❌ НЕУДАЧНО"
@@ -171,7 +168,6 @@ def log_auth_attempt(ip, username, success=False, message=""):
 WEBHOOK_LOG = os.path.join(LOG_DIR, 'webhook_requests.log')
 
 def log_webhook_request(ip, data, status=200):
-    """Логирует запрос к webhook"""
     try:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_entry = f"[{timestamp}] IP: {ip} | Статус: {status} | Данные: {json.dumps(data)}\n"
@@ -185,7 +181,6 @@ def log_webhook_request(ip, data, status=200):
 # ============================================================
 
 def send_telegram(text):
-    """Отправляет сообщение в Telegram с логированием"""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     
     if BROADCAST_MODE:
@@ -248,7 +243,6 @@ def send_telegram(text):
 # ============================================================
 
 def telegram_sender():
-    """Фоновый поток для отправки сообщений в Telegram"""
     global queue
     logger.info("🔄 [THREAD] Поток telegram_sender запущен")
     
@@ -273,7 +267,6 @@ def telegram_sender():
                     logger.info(f"⏳ [THREAD] Пауза 5 секунд перед повторной попыткой...")
                     time.sleep(5)
             else:
-                # Очередь пуста, просто ждем
                 pass
                 
             time.sleep(0.5)
@@ -284,7 +277,6 @@ def telegram_sender():
             logger.info(f"⏳ [THREAD] Пауза 10 секунд после критической ошибки...")
             time.sleep(10)
 
-# Запускаем поток отправки
 logger.info("🔄 Запуск фонового потока telegram_sender...")
 thread = threading.Thread(target=telegram_sender, daemon=True)
 thread.start()
@@ -426,11 +418,36 @@ document.addEventListener('DOMContentLoaded',function(){applyFilters();startAuto
 '''
 
 # ============================================================
+# Веб-морда отключена — заглушка
+# ============================================================
+
+WEB_DISABLED_HTML = '''
+<!DOCTYPE html>
+<html>
+<head><title>Web UI Disabled</title></head>
+<body style="background:#1e1e1e;color:#d4d4d4;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
+    <div style="text-align:center;max-width:600px;padding:40px;background:#252526;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);">
+        <h1 style="color:#f44747;">🌐 Веб-морда отключена</h1>
+        <p style="color:#888;">Веб-интерфейс отключен в настройках.</p>
+        <p style="color:#888;">Webhook доступен по адресу: <code style="background:#1e1e1e;padding:2px 8px;border-radius:4px;color:#4ec9b0;">/webhook</code></p>
+        <p style="color:#888;">Статус: <span style="color:#4ec9b0;">✅ Коллектор работает</span></p>
+        <hr style="border-color:#333;">
+        <p style="color:#555;font-size:12px;">SornMonitor Collector v2.0</p>
+    </div>
+</body>
+</html>
+'''
+
+# ============================================================
 # Маршруты Flask
 # ============================================================
 
 @app.route('/', methods=['GET', 'POST'])
 def login():
+    # Если веб-морда отключена — показываем заглушку
+    if not WEB_ENABLED:
+        return WEB_DISABLED_HTML, 200
+    
     if session.get('authenticated'):
         return render_template_string(MAIN_HTML, 
                                     events=events, 
@@ -534,6 +551,10 @@ def webhook():
         log_webhook_request(client_ip, data, 403)
         return 'Forbidden', 403
     
+    if not data:
+        logger.warning(f"⚠️ [WEBHOOK] Пустой запрос от {client_ip}")
+        return 'Bad Request', 400
+    
     event = {
         'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'server': data.get('server', 'unknown'),
@@ -601,6 +622,18 @@ def get_stats():
             stats[server]['errors'] += 1
     return jsonify(stats)
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Healthcheck endpoint для мониторинга"""
+    return jsonify({
+        'status': 'ok',
+        'web_enabled': WEB_ENABLED,
+        'queue_size': len(queue),
+        'events_count': len(events),
+        'telegram_configured': bool(TOKEN),
+        'uptime': 'running'
+    })
+
 # ============================================================
 # Запуск
 # ============================================================
@@ -611,10 +644,11 @@ if __name__ == '__main__':
     print("=" * 60)
     
     if not WEB_ENABLED:
-        print("🌐 Веб-морда ОТКЛЮЧЕНА (работает только телеграм)")
+        print("🌐 Веб-морда ОТКЛЮЧЕНА (только /webhook работает)")
     else:
         print(f"🌐 Веб-морда: http://{args.host}:{args.port}")
     
+    print(f"📡 Webhook: http://{args.host}:{args.port}/webhook")
     print(f"📊 Загружено {len(events)} событий")
     print(f"📨 Очередь: {len(queue)}")
     print(f"🤖 Telegram бот: {'✅' if TOKEN else '❌'}")
@@ -630,25 +664,10 @@ if __name__ == '__main__':
     print("📡 Ожидание событий...")
     print("")
     
-    # Создаем симлинк для логов в корень
-    log_symlink = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'collector.log')
-    if not os.path.exists(log_symlink):
-        try:
-            os.symlink(os.path.join(LOG_DIR, 'collector.log'), log_symlink)
-        except:
-            pass
-    
-    if not WEB_ENABLED:
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("⏹️ Остановка коллектора...")
-            print("\n⏹️ Остановка коллектора...")
-    else:
-        try:
-            app.run(host=args.host, port=args.port, debug=False)
-        except Exception as e:
-            logger.error(f"🔥 Критическая ошибка Flask: {e}")
-            error_logger.error(traceback.format_exc())
-            print(f"🔥 Критическая ошибка: {e}")
+    # Всегда запускаем Flask, чтобы webhook работал
+    try:
+        app.run(host=args.host, port=args.port, debug=False)
+    except Exception as e:
+        logger.error(f"🔥 Критическая ошибка Flask: {e}")
+        error_logger.error(traceback.format_exc())
+        print(f"🔥 Критическая ошибка: {e}")
