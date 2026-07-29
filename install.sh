@@ -8,7 +8,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║         📊 Установка SornMonitor Collector           ║${NC}"
+echo -e "${BLUE}║         📊 Установка SornMonitor Collector             ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -222,6 +222,19 @@ EOF
         exit 1
         ;;
 esac
+
+# Скачиваем sorn-monitor.sh с GitHub
+echo ""
+echo -e "${YELLOW}📥 Скачиваем sorn-monitor.sh с GitHub...${NC}"
+curl -s -L -o sorn-monitor.sh https://raw.githubusercontent.com/Sornodod/Collector-Monitoring/main/sorn-monitor.sh
+
+if [ $? -ne 0 ] || [ ! -s "sorn-monitor.sh" ]; then
+    echo -e "${RED}❌ Не удалось скачать sorn-monitor.sh!${NC}"
+    echo -e "${YELLOW}Проверь интернет и доступ к GitHub${NC}"
+else
+    chmod +x sorn-monitor.sh
+    echo -e "${GREEN}✅ sorn-monitor.sh скачан (размер: $(du -h sorn-monitor.sh | cut -f1))${NC}"
+fi
 
 # Создаем директорию для конфигов
 CONFIG_DIR="$HOME/.config/sornmonitor"
@@ -511,7 +524,7 @@ echo -e "${GREEN}✅ Создан скрипт отправки: ./send_event.sh
 # Финальный вывод
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         ✅ УСТАНОВКА ЗАВЕРШЕНА!                       ║${NC}"
+echo -e "${GREEN}║         ✅ УСТАНОВКА ЗАВЕРШЕНА!                        ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${YELLOW}📋 Информация:${NC}"
