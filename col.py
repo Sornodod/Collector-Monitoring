@@ -10,6 +10,7 @@ import secrets
 import logging
 import sys
 import argparse
+import traceback
 
 # Парсинг аргументов
 parser = argparse.ArgumentParser(description='SornMonitor Collector')
@@ -35,7 +36,7 @@ if os.path.exists(CONFIG_FILE):
     BROADCAST_MODE = config.get('broadcast_mode', False)
     ADMIN_LOGIN = config.get('admin_login', 'admin')
     ADMIN_PASSWORD = config.get('admin_password', 'admin123')
-    WEB_ENABLED = config.get('web_enabled', True)  # ← НОВОЕ!
+    WEB_ENABLED = config.get('web_enabled', True)
     WEB_HOST = config.get('web_host', '0.0.0.0')
     WEB_PORT = config.get('web_port', 5000)
     ALLOWED_IPS = config.get('allowed_ips', ['127.0.0.1'])
@@ -107,6 +108,7 @@ def log_auth_attempt(ip, username, success=False, message=""):
         log_entry = f"[{timestamp}] {status} | IP: {ip} | Пользователь: {username} | {message}\n"
         with open(AUTH_LOG, 'a') as f:
             f.write(log_entry)
+        print(f"🔐 [АВТОРИЗАЦИЯ] {status} | {username} | {ip} | {message}")
     except Exception as e:
         print(f"Ошибка логирования: {e}")
 
@@ -124,49 +126,106 @@ def log_webhook_request(ip, data, status=200):
         print(f"Ошибка логирования: {e}")
 
 def send_telegram(text):
+    """Отправляет сообщение в Telegram с логированием"""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    
     if BROADCAST_MODE:
         try:
-            updates = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates").json()
+            print("📡 [BROADCAST] Получение списка подписчиков...")
+            updates = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates", timeout=10).json()
             chat_ids = set()
             for update in updates.get('result', []):
                 if 'message' in update:
                     chat_ids.add(update['message']['chat']['id'])
+            
+            print(f"👥 [BROADCAST] Найдено подписчиков: {len(chat_ids)}")
+            
+            if not chat_ids:
+                print("⚠️ [BROADCAST] Нет подписчиков! Напишите /start боту")
+                return False
+            
+            success_count = 0
             for chat_id in chat_ids:
                 try:
-                    requests.post(url, json={'chat_id': chat_id, 'text': text}, timeout=10)
-                except:
-                    pass
-            return True
+                    response = requests.post(url, json={'chat_id': chat_id, 'text': text}, timeout=10)
+                    if response.status_code == 200:
+                        success_count += 1
+                        print(f"📨 [BROADCAST] Отправлено в чат {chat_id}: OK")
+                    else:
+                        print(f"❌ [BROADCAST] Ошибка в чат {chat_id}: {response.status_code}")
+                except Exception as e:
+                    print(f"❌ [BROADCAST] Ошибка в чат {chat_id}: {e}")
+            
+            print(f"📊 [BROADCAST] Успешно отправлено: {success_count}/{len(chat_ids)}")
+            return success_count > 0
+            
         except Exception as e:
-            print(f"❌ Ошибка broadcast: {e}")
+            print(f"❌ [BROADCAST] Критическая ошибка: {e}")
+            traceback.print_exc()
             return False
     else:
         try:
+            print(f"📡 [PRIVATE] Отправка в чат {CHAT_ID}...")
             response = requests.post(url, json={'chat_id': CHAT_ID, 'text': text}, timeout=10)
-            return response.status_code == 200
+            print(f"📨 [PRIVATE] Статус ответа: {response.status_code}")
+            
+            if response.status_code == 200:
+                print(f"✅ [PRIVATE] Успешно отправлено в чат {CHAT_ID}")
+                return True
+            else:
+                print(f"❌ [PRIVATE] Ошибка: {response.text}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            print("❌ [PRIVATE] Таймаут при отправке в Telegram")
+            return False
         except Exception as e:
-            print(f"❌ Ошибка Telegram: {e}")
+            print(f"❌ [PRIVATE] Ошибка Telegram: {e}")
+            traceback.print_exc()
             return False
 
 def telegram_sender():
+    """Фоновый поток для отправки сообщений в Telegram"""
     global queue
+    print("🔄 [THREAD] Поток telegram_sender запущен")
+    
     while True:
-        if queue:
-            event = queue.pop(0)
-            text = f"📊 {event['server']}\n📝 {event['message']}"
-            if event.get('error'):
-                text = f"⚠️ {text}"
-            if send_telegram(text):
-                print(f"✅ Отправлено: {event['server']}")
+        try:
+            if queue:
+                queue_size = len(queue)
+                print(f"📨 [THREAD] Обработка очереди: {queue_size} событий")
+                
+                event = queue.pop(0)
+                print(f"📤 [THREAD] Отправка: {event['server']} | {event['message']}")
+                
+                text = f"📊 {event['server']}\n📝 {event['message']}"
+                if event.get('error'):
+                    text = f"⚠️ {text}"
+                
+                if send_telegram(text):
+                    print(f"✅ [THREAD] Успешно отправлено: {event['server']}")
+                else:
+                    print(f"❌ [THREAD] Ошибка отправки, возвращаем в очередь: {event['server']}")
+                    queue.insert(0, event)
+                    print(f"⏳ [THREAD] Пауза 5 секунд перед повторной попыткой...")
+                    time.sleep(5)
             else:
-                print(f"❌ Ошибка, возвращаем в очередь: {event['server']}")
-                queue.insert(0, event)
-                time.sleep(5)
-        time.sleep(0.5)
+                # Очередь пуста, просто ждем
+                pass
+                
+            time.sleep(0.5)
+            
+        except Exception as e:
+            print(f"🔥 [THREAD] КРИТИЧЕСКАЯ ОШИБКА в telegram_sender: {e}")
+            traceback.print_exc()
+            print(f"⏳ [THREAD] Пауза 10 секунд после критической ошибки...")
+            time.sleep(10)
 
+# Запускаем поток отправки
+print("🔄 Запуск фонового потока telegram_sender...")
 thread = threading.Thread(target=telegram_sender, daemon=True)
 thread.start()
+print("✅ Фоновый поток запущен")
 
 LOGIN_HTML = '''
 <!DOCTYPE html>
@@ -315,18 +374,23 @@ def login():
         totp_code = request.form.get('totp', '')
         client_ip = request.remote_addr
         
+        print(f"🔐 [AUTH] Попытка входа: {username} | IP: {client_ip}")
+        
         if username in USERS and USERS[username] == password:
             if TOTP_SECRET:
                 totp = pyotp.TOTP(TOTP_SECRET)
                 if not totp.verify(totp_code):
+                    print(f"❌ [AUTH] Неверный 2FA код: {username} | IP: {client_ip}")
                     log_auth_attempt(client_ip, username, False, "Неверный 2FA код")
                     return render_template_string(LOGIN_HTML, error="❌ Неверный 2FA код", totp_enabled=True)
             
             session['authenticated'] = True
             session['username'] = username
+            print(f"✅ [AUTH] Успешный вход: {username} | IP: {client_ip}")
             log_auth_attempt(client_ip, username, True, "Успешный вход")
             return redirect(url_for('login'))
         else:
+            print(f"❌ [AUTH] Неверные логин/пароль: {username} | IP: {client_ip}")
             log_auth_attempt(client_ip, username, False, "Неверный логин или пароль")
             return render_template_string(LOGIN_HTML, error="❌ Неверный логин или пароль", totp_enabled=TOTP_SECRET is not None)
     
@@ -335,6 +399,7 @@ def login():
 @app.route('/logout', methods=['POST'])
 def logout():
     session.clear()
+    print("🚪 [AUTH] Выход из системы")
     return 'OK', 200
 
 @app.route('/api/ips', methods=['GET'])
@@ -366,6 +431,7 @@ def add_ip():
     ALLOWED_IPS.append(ip)
     with open(ALLOWED_IPS_FILE, 'w') as f:
         json.dump(ALLOWED_IPS, f, indent=2)
+    print(f"✅ [IP] Добавлен IP: {ip}")
     return jsonify({'status': 'ok', 'message': f'IP {ip} добавлен'})
 
 @app.route('/api/ips', methods=['DELETE'])
@@ -381,6 +447,7 @@ def remove_ip():
     ALLOWED_IPS.remove(ip)
     with open(ALLOWED_IPS_FILE, 'w') as f:
         json.dump(ALLOWED_IPS, f, indent=2)
+    print(f"🗑️ [IP] Удален IP: {ip}")
     return jsonify({'status': 'ok', 'message': f'IP {ip} удален'})
 
 @app.route('/webhook', methods=['POST'])
@@ -389,9 +456,11 @@ def webhook():
     client_ip = request.remote_addr
     data = request.json
     
+    print(f"📥 [WEBHOOK] Получен запрос от {client_ip}")
+    
     # Проверка IP
     if client_ip != '127.0.0.1' and client_ip not in ALLOWED_IPS:
-        print(f"🔴 БЛОКИРОВКА: {client_ip}")
+        print(f"🔴 [WEBHOOK] БЛОКИРОВКА: {client_ip} не в белом списке")
         log_webhook_request(client_ip, data, 403)
         return 'Forbidden', 403
     
@@ -402,14 +471,18 @@ def webhook():
         'error': data.get('error', '')
     }
     
+    print(f"📥 [WEBHOOK] Событие: {event['server']} | {event['message']} | Ошибка: {event['error']}")
+    
     queue.append(event)
     events.append(event)
     if len(events) > 1000:
         events = events[-1000:]
     save_events(events)
     
-    print(f"[{event['time']}] {event['server']}: {event['message']}")
+    queue_size = len(queue)
+    print(f"📊 [WEBHOOK] Очередь: {queue_size} событий")
     log_webhook_request(client_ip, data, 200)
+    
     return 'OK', 200
 
 @app.route('/clear', methods=['POST'])
@@ -419,6 +492,7 @@ def clear():
     global events
     events = []
     save_events(events)
+    print("🗑️ [CLEAR] Все события очищены")
     return 'OK', 200
 
 @app.route('/events', methods=['GET'])
@@ -458,34 +532,39 @@ def get_stats():
     return jsonify(stats)
 
 if __name__ == '__main__':
-    # Проверяем, включена ли веб-морда
+    print("=" * 60)
+    print("🚀 SornMonitor Collector v2.0")
+    print("=" * 60)
+    
     if not WEB_ENABLED:
         print("🌐 Веб-морда ОТКЛЮЧЕНА (работает только телеграм)")
-        print(f"🚀 Загружено {len(events)} событий")
-        print(f"📨 Очередь: {len(queue)}")
-        print(f"🤖 Telegram бот: {'✅' if TOKEN else '❌'}")
-        print(f"👤 Логин: {ADMIN_LOGIN}")
-        if TOTP_SECRET:
-            print(f"🔐 2FA секрет: {TOTP_SECRET}")
-        else:
-            print("⚠️  2FA отключена")
-        print(f"🌐 Белый список: {', '.join(ALLOWED_IPS)}")
-        
-        # Бесконечный цикл для поддержки телеграм-обработчика
+    else:
+        print(f"🌐 Веб-морда: http://{args.host}:{args.port}")
+    
+    print(f"📊 Загружено {len(events)} событий")
+    print(f"📨 Очередь: {len(queue)}")
+    print(f"🤖 Telegram бот: {'✅' if TOKEN else '❌'}")
+    print(f"👤 Логин: {ADMIN_LOGIN}")
+    
+    if TOTP_SECRET:
+        print(f"🔐 2FA секрет: {TOTP_SECRET}")
+    else:
+        print("⚠️  2FA отключена")
+    
+    print(f"🌐 Белый список: {', '.join(ALLOWED_IPS)}")
+    print("=" * 60)
+    print("📡 Ожидание событий...")
+    print("")
+    
+    if not WEB_ENABLED:
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n⏹️ Остановка коллектора...")
     else:
-        print(f"🚀 Загружено {len(events)} событий")
-        print(f"📨 Очередь: {len(queue)}")
-        print(f"🤖 Telegram бот: {'✅' if TOKEN else '❌'}")
-        print(f"👤 Логин: {ADMIN_LOGIN}")
-        if TOTP_SECRET:
-            print(f"🔐 2FA секрет: {TOTP_SECRET}")
-        else:
-            print("⚠️  2FA отключена")
-        print(f"🌐 Белый список: {', '.join(ALLOWED_IPS)}")
-        print(f"🌐 Сервер: http://{args.host}:{args.port}")
-        app.run(host=args.host, port=args.port, debug=False)
+        try:
+            app.run(host=args.host, port=args.port, debug=False)
+        except Exception as e:
+            print(f"🔥 Критическая ошибка Flask: {e}")
+            traceback.print_exc()
