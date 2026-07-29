@@ -123,17 +123,6 @@ install_venv() {
     fi
     echo -e "${GREEN}✅ Зависимости установлены${NC}"
     
-    # Создаем run.sh для venv
-    cat > run.sh << 'EOF'
-#!/bin/bash
-cd "$(dirname "$0")"
-source .venv/bin/activate
-python3 col.py "$@"
-EOF
-    
-    chmod +x run.sh
-    echo -e "${GREEN}✅ Создан скрипт запуска: ./run.sh (с venv)${NC}"
-    
     return 0
 }
 
@@ -164,29 +153,52 @@ install_global() {
     
     echo -e "${GREEN}✅ Зависимости установлены глобально${NC}"
     
-    # Создаем run.sh для глобальной установки
-    cat > run.sh << 'EOF'
-#!/bin/bash
-cd "$(dirname "$0")"
-python3 col.py "$@"
-EOF
-    
-    chmod +x run.sh
-    echo -e "${GREEN}✅ Создан скрипт запуска: ./run.sh (глобально)${NC}"
-    
     return 0
 }
 
-# Скачиваем col.py с GitHub
-echo -e "${YELLOW}📥 Скачиваем col.py с GitHub...${NC}"
-curl -s -L -o col.py https://raw.githubusercontent.com/Sornodod/Collector-Monitoring/main/col.py
+# ============================================================
+# СКАЧИВАНИЕ ВСЕХ ФАЙЛОВ С GITHUB
+# ============================================================
 
-if [ $? -ne 0 ] || [ ! -s "col.py" ]; then
-    echo -e "${RED}❌ Не удалось скачать col.py!${NC}"
-    echo -e "${YELLOW}Проверь интернет и доступ к GitHub${NC}"
-    exit 1
-fi
-echo -e "${GREEN}✅ col.py скачан (размер: $(du -h col.py | cut -f1))${NC}"
+echo ""
+echo -e "${YELLOW}📥 Скачиваем все файлы с GitHub...${NC}"
+echo ""
+
+# Список файлов для скачивания
+declare -A FILES=(
+    ["col.py"]="https://raw.githubusercontent.com/Sornodod/Collector-Monitoring/main/col.py"
+    ["sorn-monitor.sh"]="https://raw.githubusercontent.com/Sornodod/Collector-Monitoring/main/sorn-monitor.sh"
+    ["run.sh"]="https://raw.githubusercontent.com/Sornodod/Collector-Monitoring/main/run.sh"
+    ["send_event.sh"]="https://raw.githubusercontent.com/Sornodod/Collector-Monitoring/main/send_event.sh"
+    ["delete.sh"]="https://raw.githubusercontent.com/Sornodod/Collector-Monitoring/main/delete.sh"
+)
+
+for filename in "${!FILES[@]}"; do
+    local url="${FILES[$filename]}"
+    
+    echo -e "${YELLOW}📥 Скачиваем ${filename}...${NC}"
+    curl -s -L -o "$filename" "$url"
+    
+    if [ $? -ne 0 ] || [ ! -s "$filename" ]; then
+        echo -e "${RED}❌ Не удалось скачать ${filename}!${NC}"
+        echo -e "${YELLOW}Проверь интернет и доступ к GitHub${NC}"
+        exit 1
+    fi
+    
+    # Делаем исполняемыми
+    if [[ "$filename" == *.sh ]]; then
+        chmod +x "$filename"
+    fi
+    
+    echo -e "${GREEN}✅ ${filename} скачан (размер: $(du -h $filename | cut -f1))${NC}"
+done
+
+echo ""
+echo -e "${GREEN}✅ Все файлы успешно скачаны${NC}"
+
+# ============================================================
+# УСТАНОВКА ЗАВИСИМОСТЕЙ
+# ============================================================
 
 # Выполняем установку в зависимости от выбора
 case $INSTALL_MODE in
@@ -208,14 +220,6 @@ case $INSTALL_MODE in
     3)
         echo -e "${YELLOW}⚠️  Пропускаем установку зависимостей${NC}"
         echo -e "${YELLOW}Не забудь установить позже: pip install flask pyotp requests${NC}"
-        
-        cat > run.sh << 'EOF'
-#!/bin/bash
-cd "$(dirname "$0")"
-python3 col.py "$@"
-EOF
-        chmod +x run.sh
-        echo -e "${GREEN}✅ Создан скрипт запуска: ./run.sh${NC}"
         ;;
     *)
         echo -e "${RED}❌ Неверный выбор!${NC}"
@@ -223,18 +227,9 @@ EOF
         ;;
 esac
 
-# Скачиваем sorn-monitor.sh с GitHub
-echo ""
-echo -e "${YELLOW}📥 Скачиваем sorn-monitor.sh с GitHub...${NC}"
-curl -s -L -o sorn-monitor.sh https://raw.githubusercontent.com/Sornodod/Collector-Monitoring/main/sorn-monitor.sh
-
-if [ $? -ne 0 ] || [ ! -s "sorn-monitor.sh" ]; then
-    echo -e "${RED}❌ Не удалось скачать sorn-monitor.sh!${NC}"
-    echo -e "${YELLOW}Проверь интернет и доступ к GitHub${NC}"
-else
-    chmod +x sorn-monitor.sh
-    echo -e "${GREEN}✅ sorn-monitor.sh скачан (размер: $(du -h sorn-monitor.sh | cut -f1))${NC}"
-fi
+# ============================================================
+# НАСТРОЙКА
+# ============================================================
 
 # Создаем директорию для конфигов
 CONFIG_DIR="$HOME/.config/sornmonitor"
@@ -418,7 +413,10 @@ EOF
 
 echo -e "${GREEN}✅ .env файл создан${NC}"
 
-# systemd сервис
+# ============================================================
+# SYSTEMD СЕРВИС
+# ============================================================
+
 echo ""
 echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
 echo -e "${YELLOW}🛠️  Настройка автозапуска (systemd)${NC}"
@@ -470,7 +468,10 @@ EOF"
     echo -e "   ${YELLOW}sudo journalctl -u $SERVICE_NAME -f${NC} - логи"
 fi
 
-# Создание alias
+# ============================================================
+# АЛИАС
+# ============================================================
+
 echo ""
 echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
 echo -e "${YELLOW}⚡ Добавить алиас для быстрого запуска?${NC}"
@@ -499,32 +500,13 @@ if [[ "$ADD_ALIAS" =~ ^[Yy]$ ]]; then
     echo -e "${GREEN}✅ Теперь можно запускать просто: sornmonitor${NC}"
 fi
 
-# Создание скрипта для отправки событий
-cat > send_event.sh << 'EOF'
-#!/bin/bash
-COLLECTOR="http://localhost:5000/webhook"
-SERVER=$(hostname)
-MESSAGE="${1:-Тестовое событие}"
-ERROR="${2:-false}"
+# ============================================================
+# ФИНАЛЬНЫЙ ВЫВОД
+# ============================================================
 
-curl -s -X POST $COLLECTOR \
-  -H "Content-Type: application/json" \
-  -d "{\"server\":\"$SERVER\",\"message\":\"$MESSAGE\",\"error\":\"$ERROR\"}"
-
-if [ $? -eq 0 ]; then
-    echo "✅ Событие отправлено"
-else
-    echo "❌ Ошибка отправки"
-fi
-EOF
-
-chmod +x send_event.sh
-echo -e "${GREEN}✅ Создан скрипт отправки: ./send_event.sh${NC}"
-
-# Финальный вывод
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         ✅ УСТАНОВКА ЗАВЕРШЕНА!                        ║${NC}"
+echo -e "${GREEN}║         ✅ УСТАНОВКА ЗАВЕРШЕНА!                       ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${YELLOW}📋 Информация:${NC}"
@@ -561,6 +543,14 @@ else
 fi
 
 echo ""
+echo -e "${YELLOW}📦 Установленные файлы:${NC}"
+echo -e "   ✅ col.py - основной код"
+echo -e "   ✅ sorn-monitor.sh - CLI менеджер"
+echo -e "   ✅ run.sh - скрипт запуска"
+echo -e "   ✅ send_event.sh - отправка событий"
+echo -e "   ✅ delete.sh - удаление"
+echo ""
+
 echo -e "${YELLOW}🚀 Запуск:${NC}"
 echo -e "   ${GREEN}./run.sh${NC} - вручную"
 if [[ "$INSTALL_SERVICE" =~ ^[Yy]$ ]]; then
